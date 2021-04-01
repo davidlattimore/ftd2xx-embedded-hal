@@ -1,6 +1,6 @@
 use crate::{Ft232hInner, PinUse};
 use libftd2xx::{ClockBitsIn, ClockBitsOut, FtdiCommon, MpsseCmdBuilder, TimeoutError};
-use std::{cell::RefCell, sync::Mutex};
+use std::{cell::RefCell, error::Error, fmt, sync::Mutex};
 
 /// SCL bitmask
 const SCL: u8 = 1 << 0;
@@ -9,6 +9,61 @@ const SDA: u8 = 1 << 1;
 
 const BITS_IN: ClockBitsIn = ClockBitsIn::MsbPos;
 const BITS_OUT: ClockBitsOut = ClockBitsOut::MsbNeg;
+
+/// Error when the slave returns a NAK instead of an ACK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NakError {
+    nak: usize,
+}
+
+impl NakError {
+    /// Get the index of the first NAK from the slave.
+    ///
+    /// For an I2C `read` this will always be zero.
+    pub const fn nak(&self) -> usize {
+        self.nak
+    }
+}
+
+impl fmt::Display for NakError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Received NAK from slave at index {}", self.nak)
+    }
+}
+
+impl Error for NakError {}
+
+/// Error returned from I2C methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum I2cError {
+    /// Timeout error from the FTDI device.
+    Timeout(TimeoutError),
+    /// Missing ACK from slave.
+    Nak(NakError),
+}
+
+impl From<TimeoutError> for I2cError {
+    fn from(to: TimeoutError) -> Self {
+        I2cError::Timeout(to)
+    }
+}
+
+impl From<NakError> for I2cError {
+    fn from(nak: NakError) -> Self {
+        I2cError::Nak(nak)
+    }
+}
+
+impl fmt::Display for I2cError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            I2cError::Timeout(to) => write!(f, "{}", to),
+            I2cError::Nak(nak) => write!(f, "{}", nak),
+        }
+    }
+}
+
+impl Error for I2cError {}
 
 /// FTDI I2C interface.
 ///
@@ -79,7 +134,7 @@ impl<'a> I2c<'a> {
 }
 
 impl<'a> embedded_hal::blocking::i2c::Read for I2c<'a> {
-    type Error = TimeoutError;
+    type Error = I2cError;
 
     fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
         assert!(!buffer.is_empty(), "buffer must be a non-empty slice");
@@ -140,12 +195,18 @@ impl<'a> embedded_hal::blocking::i2c::Read for I2c<'a> {
         inner.ft.write_all(&mpsse_cmd.as_slice())?;
         let mut ack_buf: [u8; 1] = [0; 1];
         inner.ft.read_all(&mut ack_buf)?;
-        inner.ft.read_all(buffer)
+        inner.ft.read_all(buffer)?;
+
+        if ack_buf[0] != 0x00 {
+            Err(NakError { nak: 0 }.into())
+        } else {
+            Ok(())
+        }
     }
 }
 
 impl<'a> embedded_hal::blocking::i2c::Write for I2c<'a> {
-    type Error = TimeoutError;
+    type Error = I2cError;
 
     fn write(&mut self, addr: u8, bytes: &[u8]) -> Result<(), Self::Error> {
         assert!(!bytes.is_empty(), "bytes must be a non-empty slice");
@@ -197,12 +258,21 @@ impl<'a> embedded_hal::blocking::i2c::Write for I2c<'a> {
 
         inner.ft.write_all(mpsse_cmd.as_slice())?;
         let mut ack_buf: Vec<u8> = vec![0; 1 + bytes.len()];
-        inner.ft.read_all(ack_buf.as_mut_slice())
+        inner.ft.read_all(ack_buf.as_mut_slice())?;
+
+        match ack_buf
+            .iter()
+            .enumerate()
+            .find_map(|(idx, &ack)| if ack != 0x00 { Some(idx) } else { None })
+        {
+            Some(idx) => Err(NakError { nak: idx }.into()),
+            None => Ok(()),
+        }
     }
 }
 
 impl<'a> embedded_hal::blocking::i2c::WriteRead for I2c<'a> {
-    type Error = TimeoutError;
+    type Error = I2cError;
 
     fn write_read(
         &mut self,
@@ -300,6 +370,15 @@ impl<'a> embedded_hal::blocking::i2c::WriteRead for I2c<'a> {
         inner.ft.write_all(&mpsse_cmd.as_slice())?;
         let mut ack_buf: Vec<u8> = vec![0; 2 + bytes.len()];
         inner.ft.read_all(&mut ack_buf)?;
-        inner.ft.read_all(buffer)
+        inner.ft.read_all(buffer)?;
+
+        match ack_buf
+            .iter()
+            .enumerate()
+            .find_map(|(idx, &ack)| if ack != 0x00 { Some(idx) } else { None })
+        {
+            Some(idx) => Err(NakError { nak: idx }.into()),
+            None => Ok(()),
+        }
     }
 }

@@ -78,7 +78,7 @@ mod spi;
 
 pub use delay::Delay;
 pub use gpio::OutputPin;
-pub use i2c::I2c;
+pub use i2c::{I2c, I2cError, NakError};
 pub use spi::Spi;
 
 use libftd2xx::{DeviceTypeError, Ft232h, Ftdi, FtdiMpsse, MpsseSettings, TimeoutError};
